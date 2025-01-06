@@ -1,0 +1,263 @@
+classdef elasticity < handle
+	% classe per gestire un problema ellittico con laplaciano, senza sorgente, misto con condizioni di Dirichlet e con condizioni di Neumann omogenee
+
+    properties
+		coord % coordinate dei vertici
+        topol % topologia degli elementi
+        bound % vertici della porzione di Dirichlet del bordo con relativi dati al contorno
+        u % soluzione
+        lambda
+        mu
+    end
+
+    methods
+        function obj=elasticity(path,data)
+        	% costruttore della classe, inizializza le coordinate dei vertici, la topologia degli elementi e le condizioni di Dirichlet da file
+        
+            obj.coord=load(sprintf("%s/%s/%s.coord",path,data,data));
+            obj.coord=obj.coord(:,1:3);
+            obj.topol=load(sprintf("%s/%s/%s.topol",path,data,data));
+            obj.topol=obj.topol(:,1:4);
+            obj.bound=load(sprintf("%s/%s/%s.dat",path,data,data));
+        end
+
+        function S=C(obj,H)
+            S=obj.lambda*trace(H)*eye(3)+obj.mu*(H+H');
+        end
+
+        function k=computeKloc(obj,e,i,a,j,b)
+            % calcola la stiffness matrix locale relativa all'elemento e
+
+            X=[obj.coord(obj.topol(e,:),:)';ones(1,4)];
+            M=inv(X);
+
+            F=zeros(3);
+            F(i,:)=M(a,1:3);
+
+            G=zeros(3);
+            G(j,:)=M(b,1:3);
+
+            Delta=1/6*abs(det(X));
+
+            k=Delta*(obj.lambda*trace(F)*trace(G)+obj.mu*(trace(F*G)+trace(F*G')));
+        end
+
+        function k=assemblyK(obj)
+            % assembla la stiffness matrix
+
+            k=zeros(3*size(obj.coord,1),3*size(obj.coord,1));
+
+            for e=1:size(obj.topol,1)
+                for i=1:3
+                    for j=1:3
+                        for a=1:4
+                            for b=1:4
+                                A=obj.topol(e,a);
+                                B=obj.topol(e,b);
+                                k(3*(A-1)+i,3*(B-1)+j)=k(3*(A-1)+i,3*(B-1)+j)+obj.computeKloc(e,i,a,j,b);
+                            end
+                        end
+                    end
+                end
+            end
+
+            k=sparse(k);
+        end
+
+        function [B,Phi]=computeLinearSystem(obj)
+        	% calcola la matrice a sinistra e il membro di destra per il sistema lineare
+        	
+            B=obj.assemblyK();
+            Phi=zeros(3*size(obj.coord,1),1);
+            for i=1:3
+                Phi=Phi-B(:,3*(obj.bound(:,1)-1)+i)*obj.bound(:,1+i);
+            end
+            for i=1:3
+                Phi(3*(obj.bound(:,1)-1)+i)=obj.bound(:,1+i);
+                B(:,3*(obj.bound(:,1)-1)+i)=0;
+                B(3*(obj.bound(:,1)-1)+i,:)=0;
+            end
+            for i=1:3
+                B(3*(obj.bound(:,1)-1)+i,3*(obj.bound(:,1)-1)+i)=speye(size(obj.bound,1));
+            end
+        end
+
+        function [w,res,iter]=solve(obj,precond)
+        	% soluzione del problema ellittico: restutuisce la soluzione, il
+            % vettore dei residui e il numero di iterazioni del PCG, accetta una
+            % stringa per specificare il tipo di precondizionamento
+
+            char=fprintf("Inizio la risoluzione del problema ellittico\n");
+
+            char=char+fprintf("Sto preparando il sistema lineare\n"); 	
+            [B,Phi]=obj.computeLinearSystem(); % calcolo della matrice e del membro di destra per il sistema lineare
+
+            % calcolo del precondizionatore di B
+            char=char+fprintf("Sto precondizionanando\n");
+            if precond=="IC"
+                L=ichol(B);
+            elseif precond=="J"
+                L=sparse(diag(diag(B)));
+            else
+                L=speye(size(B,2));
+            end
+
+            char=char+fprintf("Sto risolvendo il sistema lineare\n");
+            [obj.u,res,iter]=PCG(B,Phi,zeros(size(B,2),1),1e-8,1e4,L); % soluzione del sistema lineare con PCG
+
+            w=obj.u; % ritorna la soluzione
+
+            fprintf(repmat('\b',1,char));
+        end
+
+        function err=error(obj,ref)
+            char=fprintf("Sto calcolando l'errore\n");
+            Ref=load(sprintf("%s",ref));
+            uRef=scatteredInterpolant(Ref(:,1),Ref(:,2),Ref(:,3));
+            uRef=uRef(obj.coord(:,1),obj.coord(:,2));
+
+            p=obj.peaks();
+            err=sum(diag(p)*(obj.u-uRef).^2)^0.5;
+
+            fprintf(repmat('\b',1,char));
+        end
+
+        function p=peaks(obj)
+            p=zeros(size(obj.coord,1),1);
+
+            for e=1:size(obj.topol,1)
+                C=[ones(3,1),obj.coord(obj.topol(e,:),:)]; % matrice C così come definita a lezione
+                Delta=0.5*det(C); % area dell'elemento
+                p(obj.topol(e,:))=p(obj.topol(e,:))+Delta/3; % aggiungo il contributo dell'elemento sui suoi vertici
+            end
+        end
+
+        function plot1(obj)
+        	% disegna la soluzione con stile per le linee definito da style
+
+            x=zeros(3,4*size(obj.topol,1));
+            y=zeros(3,4*size(obj.topol,1));
+            z=zeros(3,4*size(obj.topol,1));
+            C=zeros(3,4*size(obj.topol,1));
+
+            n=size(obj.coord,1);
+            d=[obj.u(3*((1:n)-1)+1),obj.u(3*((1:n)-1)+2),obj.u(3*((1:n)-1)+3)];
+            d=sqrt(diag(d*d'));
+
+            for e=1:size(obj.topol)
+                k=0;
+                for a=1:4
+                    for b=a+1:4
+                        for c=b+1:4
+                            k=k+1;
+                            x(:,4*(e-1)+k)=obj.coord(obj.topol(e,[a,b,c]),1);
+                            y(:,4*(e-1)+k)=obj.coord(obj.topol(e,[a,b,c]),2);
+                            z(:,4*(e-1)+k)=obj.coord(obj.topol(e,[a,b,c]),3);
+                            C(:,4*(e-1)+k)=d(obj.topol(e,[a,b,c]));
+                        end
+                    end
+                end
+            end
+
+            axis equal;
+            fill3(x,y,z,C);
+            axis equal;
+        end
+
+        function plot2(obj)
+        	% disegna la soluzione con stile per le linee definito da style
+
+            x=zeros(3,4*size(obj.topol,1));
+            y=zeros(3,4*size(obj.topol,1));
+            z=zeros(3,4*size(obj.topol,1));
+            C=zeros(3,4*size(obj.topol,1));
+
+            for e=1:size(obj.topol)
+                k=0;
+                for a=1:4
+                    for b=a+1:4
+                        for c=b+1:4
+                            k=k+1;
+                            x(:,4*(e-1)+k)=obj.coord(obj.topol(e,[a,b,c]),1)+obj.u(3*(obj.topol(e,[a,b,c])-1)+1);
+                            y(:,4*(e-1)+k)=obj.coord(obj.topol(e,[a,b,c]),2)+obj.u(3*(obj.topol(e,[a,b,c])-1)+2);
+                            z(:,4*(e-1)+k)=obj.coord(obj.topol(e,[a,b,c]),3)+obj.u(3*(obj.topol(e,[a,b,c])-1)+3);
+                            C(:,4*(e-1)+k)=0;
+                        end
+                    end
+                end
+            end
+
+            axis equal;
+            fill3(x,y,z,C);
+            axis equal;
+        end
+
+
+        function t=T(obj,a)
+            t=zeros(3);
+
+            s=0;
+            for i=1:3
+                for e=1:size(obj.topol,1)
+                    if ismember(a,obj.topol(e,:))
+                        k=k+1;
+
+                        X=[obj.coord(obj.topol(e,:),:)';ones(1,4)];
+                        M=inv(X);
+
+                        Delta=1/6*abs(det(X));
+                        s=s+Delta;
+
+                        for b=1:4
+                            H=zeros(3);
+                            H(i,:)=M(b,1:3);
+
+                            t=t+Delta*obj.u(3*(b-1)+i)*obj.C(H);
+                        end
+                    end
+                end
+            end
+
+            t=t/s;
+        end
+    end
+
+    
+
+    function plot2(obj)
+        	% disegna la soluzione con stile per le linee definito da style
+
+            x=zeros(3,4*size(obj.topol,1));
+            y=zeros(3,4*size(obj.topol,1));
+            z=zeros(3,4*size(obj.topol,1));
+            C=zeros(3,4*size(obj.topol,1));
+
+            n=size(obj.coord,1);
+
+            for a=1:n
+                u=
+            end
+            d=[obj.u(3*((1:n)-1)+1),obj.u(3*((1:n)-1)+2),obj.u(3*((1:n)-1)+3)];
+            d=norm(,"fro");
+
+            for e=1:size(obj.topol)
+                k=0;
+                for a=1:4
+                    for b=a+1:4
+                        for c=b+1:4
+                            k=k+1;
+                            x(:,4*(e-1)+k)=obj.coord(obj.topol(e,[a,b,c]),1)+obj.u(3*(obj.topol(e,[a,b,c])-1)+1);
+                            y(:,4*(e-1)+k)=obj.coord(obj.topol(e,[a,b,c]),2)+obj.u(3*(obj.topol(e,[a,b,c])-1)+2);
+                            z(:,4*(e-1)+k)=obj.coord(obj.topol(e,[a,b,c]),3)+obj.u(3*(obj.topol(e,[a,b,c])-1)+3);
+                            C(:,4*(e-1)+k)=0;
+                        end
+                    end
+                end
+            end
+
+            axis equal;
+            fill3(x,y,z,C);
+            axis equal;
+        end
+    end
+end
